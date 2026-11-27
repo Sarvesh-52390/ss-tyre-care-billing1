@@ -20,7 +20,7 @@
   <p style="font-size:11px;color:#687386;margin:10px 0 0">Access is restricted to the authorised business account.</p>
  </form>
 </div>
-<div id="cloudHistory" class="card" style="max-width:1200px;margin:18px auto 0;padding:16px;display:none">
+<div id="cloudHistory" class="card no-print" style="max-width:1200px;margin:18px auto 0;padding:16px;display:none">
  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
   <div><h2 style="margin:0">Cloud bill history</h2><div class="small">Search, reopen and print saved documents</div></div>
   <button class="secondary" type="button" onclick="secureSignOut()">Sign out</button>
@@ -80,12 +80,16 @@ document.addEventListener('input',function(e){if(e.target && e.target.matches('i
 document.addEventListener('change',function(e){if(e.target && e.target.matches('input,textarea,select')) updatePreview();});
 updatePreview();
 
-function saveAsPDF(){
-  // Opens the browser print dialog; choose “Save as PDF” as the destination.
+async function saveAsPDF(){
+  // Save to Supabase first so printing also creates a cloud history record.
+  const saved=await saveInvoiceStorage({silent:true});
+  if(!saved){alert('PDF not opened because cloud saving did not complete. Please fix the save error first.');return}
   window.print();
 }
-function printDocument(){
-  // Opens the browser print dialog for a physical printer.
+async function printDocument(){
+  // Save to Supabase first so printed invoices are also retained in cloud history.
+  const saved=await saveInvoiceStorage({silent:true});
+  if(!saved){alert('Printing not started because cloud saving did not complete. Please fix the save error first.');return}
   window.print();
 }
 
@@ -111,22 +115,32 @@ function cloudPayload(){
   cgst:Number((tax/2).toFixed(2)),sgst:Number((tax/2).toFixed(2)),bill_data:data,
   updated_at:new Date().toISOString()};
 }
-async function saveInvoiceStorage(){
+async function saveInvoiceStorage(options={}){
  const session=activeSession;
- if(!session||session.user.email?.toLowerCase()!==AUTHORISED_EMAIL){showPrivateLogin('Please sign in with the authorised account.');return}
+ if(!session||session.user?.email?.toLowerCase()!==AUTHORISED_EMAIL){showPrivateLogin('Please sign in with the authorised account.');return false}
  const payload=cloudPayload();
- const {error}=await cloudClient.from('bills').upsert(payload,{onConflict:'document_no,bill_date'});
- if(error){alert('Cloud save failed: '+error.message);return}
- // Preserve existing browser history; new cloud saves are additionally recorded locally for offline continuity.
- const local={mode};fields.forEach(k=>local[k]=$(k).value);
- local.checks=['svcAlign','svcBalance','svcFit','svcPuncture'].map(k=>$(k).checked);
- const key=(local.docNo||'Invoice')+'-'+(local.date||today());
- let list=JSON.parse(localStorage.getItem('sstcInvoices')||'[]');
- list=list.filter(x=>x.key!==key);list.unshift({key,customer:local.customer,date:local.date,data:local});
- localStorage.setItem('sstcInvoices',JSON.stringify(list.slice(0,100)));
- refreshStoredInvoices();$('savedInvoices').value=key;
- alert('Invoice saved securely to cloud.');
- await loadCloudHistory();
+ try{
+  const {data,error}=await cloudClient.from('bills')
+   .upsert(payload,{onConflict:'document_no,bill_date'})
+   .select('id,document_no,bill_date,total_amount').single();
+  if(error)throw error;
+  if(!data?.id)throw new Error('The cloud database did not confirm the saved bill.');
+  // Keep a local recovery copy only after Supabase confirms the cloud write.
+  const local={mode};fields.forEach(k=>local[k]=$(k).value);
+  local.checks=['svcAlign','svcBalance','svcFit','svcPuncture'].map(k=>$(k).checked);
+  const key=(local.docNo||'Invoice')+'-'+(local.date||today());
+  let list=JSON.parse(localStorage.getItem('sstcInvoices')||'[]');
+  list=list.filter(x=>x.key!==key);list.unshift({key,customer:local.customer,date:local.date,data:local});
+  localStorage.setItem('sstcInvoices',JSON.stringify(list.slice(0,100)));
+  refreshStoredInvoices();$('savedInvoices').value=key;
+  if(!options.silent)alert('Invoice saved to cloud successfully.');
+  await loadCloudHistory(session);
+  return true;
+ }catch(error){
+  console.error('SS Tyre Care cloud save failed:',error);
+  if(!options.silent)alert('Cloud save failed: '+(error?.message||'Unknown error')+'. Your invoice has not been marked as cloud-saved.');
+  return false;
+ }
 }
 function showPrivateLogin(message=''){
  $('privateLogin').style.display='flex';$('cloudHistory').style.display='none';
