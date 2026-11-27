@@ -53,7 +53,7 @@
 <div id="vehicleDetailsPreview" class="vehicle-details"><div class="vehicle-print" id="pVehicleNo">Vehicle No: Not provided</div><div class="vehicle-print" id="pVehicleModel">Vehicle Model: Not provided</div></div>
 <table><thead><tr><th style="width:7%">S.No</th><th>Description</th><th style="width:13%">HSN</th><th class="num" style="width:10%">Qty</th><th class="num" style="width:17%">Rate excl. GST</th><th class="num" style="width:17%">Amount</th></tr></thead><tbody id="pRows"><tr><td colspan="6" class="empty">No items selected yet</td></tr></tbody></table>
 <div class="totals"><div><span>Taxable value</span><strong id="pTaxable">₹0.00</strong></div><div><span>CGST</span><span id="pCgst">₹0.00</span></div><div><span>SGST</span><span id="pSgst">₹0.00</span></div><div><span>Total GST</span><span id="pTax">₹0.00</span></div><div class="grand"><span>Grand total</span><span id="pGrand">₹0.00</span></div></div><div class="note"><strong>Amount in words</strong><div id="pWords">Rupees Zero Only</div><br><strong>Notes / Terms</strong><div id="pNotes"></div></div><div class="signature"><strong>For S.S. TYRE CARE</strong><span>Authorised Signatory</span></div></div></section></main>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.4"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.2"></script>
 <script>
 const $=id=>document.getElementById(id);let mode='quotation';const fields=['docNo','date','customer','phone','address','terms','gst','tyreModel','tyreSize','hsn','tyreQty','tyrePrice','salesTyreModel','salesTyreSize','salesHsn','salesTyreQty','salesTyrePrice','svcAlign','priceAlign','svcBalance','priceBalance','svcFit','priceFit','svcPuncture','pricePuncture','vehicle','vehicleModel','otherService','otherPrice','notes'];const money=n=>'₹'+Number(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});function today(){const d=new Date();return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0')}function dateDisplay(v){if(!v)return '';let p=v.split('-');return p.length===3?p[2]+'/'+p[1]+'/'+p[0]:v}
 function nextNumber(){let n=Number(localStorage.getItem('sstcNextDocNo')||'31')+1;localStorage.setItem('sstcNextDocNo',String(n));return n}
@@ -97,6 +97,8 @@ const cloudClient=window.supabase.createClient(SUPABASE_URL,SUPABASE_PUBLISHABLE
  auth:{persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}
 });
 let cloudBills=[];
+let activeSession=null;
+let historyRequest=0;
 function cloudMoney(n){return money(Number(n||0))}
 function cloudPayload(){
  const data={mode};fields.forEach(k=>data[k]=$(k).value);
@@ -110,7 +112,7 @@ function cloudPayload(){
   updated_at:new Date().toISOString()};
 }
 async function saveInvoiceStorage(){
- const {data:{session}}=await cloudClient.auth.getSession();
+ const session=activeSession;
  if(!session||session.user.email?.toLowerCase()!==AUTHORISED_EMAIL){showPrivateLogin('Please sign in with the authorised account.');return}
  const payload=cloudPayload();
  const {error}=await cloudClient.from('bills').upsert(payload,{onConflict:'document_no,bill_date'});
@@ -137,28 +139,39 @@ function showPrivateApp(){
  $('cloudHistory').style.display='block';
 }
 async function secureSignOut(){
- await cloudClient.auth.signOut();cloudBills=[];showPrivateLogin('You have been signed out.');
+ const {error}=await cloudClient.auth.signOut({scope:'local'});
+ if(error){$('historyStatus').textContent='Sign-out issue: '+error.message;return}
+ activeSession=null;cloudBills=[];showPrivateLogin('You have been signed out.');
 }
 $('loginForm').addEventListener('submit',async e=>{
  e.preventDefault();$('loginButton').disabled=true;$('loginError').textContent='Checking credentials…';
- const email=AUTHORisedEmailSafe();
- const password=$('loginPassword').value;
- const {data,error}=await cloudClient.auth.signInWithPassword({email,password});
- $('loginButton').disabled=false;
- if(error){$('loginError').textContent='Sign-in failed. Check the shared password and try again.';return}
- if(data.user?.email?.toLowerCase()!==AUTHORISED_EMAIL){await cloudClient.auth.signOut();showPrivateLogin('This account is not authorised.');return}
- $('loginPassword').value='';showPrivateApp();await loadCloudHistory();
+ try{
+  const email=AUTHORisedEmailSafe();
+  const password=$('loginPassword').value;
+  const {data,error}=await cloudClient.auth.signInWithPassword({email,password});
+  if(error){$('loginError').textContent='Sign-in failed: '+error.message;return}
+  if(data.user?.email?.toLowerCase()!==AUTHORISED_EMAIL){
+   await cloudClient.auth.signOut({scope:'local'});activeSession=null;
+   showPrivateLogin('This account is not authorised.');return
+  }
+  activeSession=data.session;
+  $('loginPassword').value='';showPrivateApp();await loadCloudHistory(activeSession);
+ }catch(error){
+  $('loginError').textContent='Unable to complete sign-in. Check your connection and try again.';
+  console.error('SS Tyre Care sign-in error:',error);
+ }finally{$('loginButton').disabled=false}
 });
 function AUTHORisedEmailSafe(){return AUTHORISED_EMAIL}
-async function loadCloudHistory(){
+async function loadCloudHistory(session=activeSession){
+ const requestId=++historyRequest;
  const status=$('historyStatus');status.textContent='Loading…';
- const {data:{session}}=await cloudClient.auth.getSession();
- if(!session||session.user.email?.toLowerCase()!==AUTHORISED_EMAIL){showPrivateLogin('Session expired. Please sign in again.');return}
+ if(!session||session.user?.email?.toLowerCase()!==AUTHORISED_EMAIL){showPrivateLogin('Session expired. Please sign in again.');return}
  let q=cloudClient.from('bills').select('id,document_no,bill_date,mode,customer_name,phone,vehicle_no,total_amount,taxable_amount,cgst,sgst,bill_data,created_at').order('bill_date',{ascending:false}).order('created_at',{ascending:false}).limit(1000);
  const from=$('historyFrom').value,to=$('historyTo').value,term=$('historySearch').value.trim();
  if(from)q=q.gte('bill_date',from);if(to)q=q.lte('bill_date',to);
  if(term)q=q.or(`document_no.ilike.%${term.replace(/[(),]/g,'')}%,customer_name.ilike.%${term.replace(/[(),]/g,'')}%,phone.ilike.%${term.replace(/[(),]/g,'')}%,vehicle_no.ilike.%${term.replace(/[(),]/g,'')}%`);
  const {data,error}=await q;
+ if(requestId!==historyRequest)return;
  if(error){status.textContent='Could not load cloud history: '+error.message;return}
  cloudBills=data||[];renderCloudHistory();status.textContent=`Loaded ${cloudBills.length} cloud document(s).`;
 }
@@ -180,14 +193,18 @@ function reopenCloudBill(i){
  window.scrollTo({top:0,behavior:'smooth'});
 }
 ['historyFrom','historyTo','historySearch'].forEach(id=>$(id).addEventListener(id==='historySearch'?'input':'change',()=>loadCloudHistory()));
-cloudClient.auth.onAuthStateChange(async(_event,session)=>{
- if(session&&session.user.email?.toLowerCase()===AUTHORISED_EMAIL){showPrivateApp();await loadCloudHistory()}
- else showPrivateLogin();
+// Keep this callback synchronous. Never await Supabase calls from inside it:
+// doing so can hold the Auth lock while loadCloudHistory tries to read Auth state.
+cloudClient.auth.onAuthStateChange((event,session)=>{
+ activeSession=session||null;
+ if(event==='INITIAL_SESSION'){
+  if(activeSession&&activeSession.user?.email?.toLowerCase()===AUTHORISED_EMAIL){
+   showPrivateApp();
+   Promise.resolve().then(()=>loadCloudHistory(activeSession));
+  }else showPrivateLogin();
+ }else if(event==='SIGNED_OUT'){
+  historyRequest++;cloudBills=[];showPrivateLogin('You have been signed out.');
+ }
 });
-(async()=>{
- const {data:{session}}=await cloudClient.auth.getSession();
- if(session&&session.user.email?.toLowerCase()===AUTHORISED_EMAIL){showPrivateApp();await loadCloudHistory()}
- else {if(session)await cloudClient.auth.signOut();showPrivateLogin()}
-})();
 
 </script></body></html>
